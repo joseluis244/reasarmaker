@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SAR MAKER for Win (Go + htmx)</title>
+<script src="https://unpkg.com/htmx.org@2.0.4" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" crossorigin="anonymous"></script>
+<style>
+body{background:#0b0f14;color:#dbe6f1;font-family:system-ui,sans-serif;margin:0;padding:24px;max-width:1080px;margin:0 auto}
+h1{font-size:20px;color:#4cc38a}
+h2{font-size:15px}
+form.panel{background:#121a24;border:1px solid #22303c;border-radius:8px;padding:16px;margin:12px 0}
+.row{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
+.field{display:flex;flex-direction:column;gap:4px}
+label{font-size:12px;color:#8aa0b4}
+input,select{background:#0b0f14;color:#dbe6f1;border:1px solid #2b3d4f;border-radius:4px;padding:6px 8px;font-size:14px;width:110px}
+.status{padding:8px 12px;border-radius:6px;font-size:13px;margin:8px 0}
+.status.ok{background:#0f2a1d;color:#4cc38a;border:1px solid #1d4d36}
+.status.error{background:#2a1215;color:#ff8b8b;border:1px solid #4d1d22}
+.btn{display:inline-block;background:#1d4d36;color:#c8f5e0;border-radius:6px;padding:8px 14px;text-decoration:none;font-size:14px}
+.btn:hover{background:#266a4a}
+.cols{display:flex;flex-wrap:wrap;gap:16px}
+table{border-collapse:collapse;font-size:13px;background:#121a24;border-radius:8px;overflow:hidden;max-height:420px;display:block;overflow-y:auto}
+th,td{padding:4px 12px;text-align:right;border-bottom:1px solid #1a2733}
+th{background:#182231;color:#8aa0b4;position:sticky;top:0}
+.chart{border:1px solid #22303c;border-radius:8px;background:#0b0f14;max-width:560px}
+table.poi{border-collapse:collapse;margin:12px 0;display:table}
+table.poi th,table.poi td{padding:4px 10px;text-align:left;position:static}
+table.poi input{width:90px}
+.hint{font-size:12px;color:#5a7f96}
+</style>
+</head>
+<body>
+<h1>SAR MAKER for Win <span style="color:#8aa0b4;font-weight:400">— Go reimplementation</span></h1>
+
+<form class="panel" hx-post="/upload" hx-target="#status" hx-swap="innerHTML" enctype="multipart/form-data">
+  <div class="row">
+    <div class="field"><label for="lpmod">LPMOD.PRM</label><input type="file" name="lpmod" id="lpmod" style="width:auto"></div>
+    <div class="field"><label for="gamma">gamma2.prm</label><input type="file" name="gamma" id="gamma" style="width:auto"></div>
+    <div class="field"><button type="submit" class="btn">Load files</button></div>
+  </div>
+</form>
+<div id="status">{{if .Loaded}}<div class="status ok">Loaded: {{len .Gammas}} gamma tables{{if .LUTs}}, {{len .LUTs}} LPMOD sections{{end}}</div>{{end}}</div>
+
+<form class="panel" hx-post="/compute" hx-target="#results" hx-swap="innerHTML">
+  <div class="row">
+    <div class="field" id="gamma-select">
+      <label for="gamma_no">GAMMA No.</label>
+      <select id="gamma_no" name="gamma_no">
+      {{range .Gammas}}<option value="{{.}}"{{if eq . $.Params.GammaNo}} selected{{end}}>G{{.}}</option>{{end}}
+      </select>
+    </div>
+    <div class="field">
+      <label for="base_color">Base Color</label>
+      <select id="base_color" name="base_color">
+        <option value="clear"{{if eq .Params.BaseColor "clear"}} selected{{end}}>Clear</option>
+        <option value="blue"{{if eq .Params.BaseColor "blue"}} selected{{end}}>Blue</option>
+      </select>
+    </div>
+    <div class="field"><label for="tuning_idx">Tuning Point (#)</label><input type="number" min="0" max="47" id="tuning_idx" name="tuning_idx" value="{{.Params.TuningIdx}}"></div>
+    <div class="field"><label for="dmin">Dmin</label><input type="number" step="0.01" id="dmin" name="dmin" value="{{.Params.Dmin}}"></div>
+    <div class="field"><label for="dmax">Dmax</label><input type="number" step="0.01" id="dmax" name="dmax" value="{{.Params.Dmax}}"></div>
+  </div>
+
+  <table class="poi">
+    <thead><tr><th>Point</th><th>QL</th><th>Density</th><th>Shift</th><th>Contrast</th></tr></thead>
+    <tbody>
+    {{range $i := seq 0 4}}
+      <tr>
+        <td>{{add $i 1}}</td>
+        <td><input type="number" min="0" max="1023" name="p{{$i}}_ql" placeholder="—" value="{{if gt (index $.Params.Points $i).QL 0}}{{(index $.Params.Points $i).QL}}{{end}}"></td>
+        <td><input type="number" step="0.0001" name="p{{$i}}_density" value="{{(index $.Params.Points $i).Density}}"></td>
+        <td><input type="number" step="0.01" name="p{{$i}}_shift" value="{{(index $.Params.Points $i).Shift}}"></td>
+        <td><input type="number" step="0.01" name="p{{$i}}_contrast" value="{{(index $.Params.Points $i).Contrast}}"></td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  <p class="hint">Deja QL vacío para no usar un punto. El punto con QL cargado aplica su shift a la curva alrededor de ese punto (smoothstep) y su contraste alrededor de su densidad.</p>
+  <div class="row"><div class="field"><button type="submit" class="btn">Compute</button></div></div>
+</form>
+
+<div id="results"></div>
+</body>
+</html>

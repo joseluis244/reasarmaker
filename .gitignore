@@ -1,0 +1,8 @@
+# built binaries
+/sar-maker
+
+# macOS
+.DS_Store
+
+# reverse-engineering input (original Windows binary under analysis)
+/ocsarmk.exe
