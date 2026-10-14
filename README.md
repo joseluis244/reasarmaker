@@ -1,10 +1,40 @@
-# SAR MAKER for Win — reimplementación en Go + htmx
+# SAR MAKER for Win — React + Vite con engine en WebAssembly
 
 Reimplementación del binario **`ocsarmk.exe`** (PE32 GUI, MFC/C++,
-`FujiPhotoFilm_MiyaD1_2002_10_21`), analizado con REA/desensamblado
-estático de Capstone. El binario original es una herramienta de QA para
-monitores médicos (DICOM GSDF) que lee tablas de calibración y genera un
-archivo de datos `sar_savedata.txt` que luego postprocesa `SarmakerPost.exe`.
+`FujiPhotoFilm_MiyaD1_2002_10_21`), analizado con REA (SHA-256 del binario:
+`4a6a413ceb603b9ba30fdd0921c3bf3c46050acd2ec9a7a61ab073c88338332a`). El
+binario original es una herramienta de QA para monitores médicos
+(DICOM GSDF) que lee tablas de calibración y genera un archivo de datos
+`sar_savedata.txt` que luego postprocesa `SarmakerPost.exe`.
+
+## Arquitectura
+
+```
+webapp/                  React 19 + Vite 8 + TypeScript (frontend)
+  src/wasm/bridge.ts     carga sar.wasm y tipa la API del engine
+  src/App.tsx            UI: cabecera/alertas, GAMMA No.+Base Color (izq),
+                         curva automática (dcha), Dmin/Dmax + puntos de
+                         interés + Compute (sección inferior)
+  src/components/        curva SVG
+  public/sar.wasm        ← engine compilado a WebAssembly (generado)
+
+wasm/main.go             build js/wasm: expone el engine como global `sarWasm`
+wasm/check/              CLI nativo que evalúa los mismos casos (diff-test)
+wasm/smoke.mjs           test diferencial: Go nativo vs wasm, outputs idénticos
+
+internal/sar/            port exacto de los algoritmos de ocsarmk.exe (Go puro)
+internal/sarwire/        tipos JSON de intercambio JS ↔ engine (camelCase)
+internal/defaults/       gamma2.prm y LPMOD.PRM embebidos con go:embed
+```
+
+El engine es el paquete Go `internal/sar` (el port recuperado del binario),
+compilado con `GOOS=js GOARCH=wasm`. React lo invoca desde el navegador:
+toda la lógica del `ocsarmk.exe` (parseo de `LPMOD.PRM`/`gamma2.prm`,
+interpolación, smoothstep, contraste, clamp monótono y generación de
+`sar_savedata.txt`) corre en WebAssembly, sin servidor. Los archivos de
+calibración de ejemplo viajan **embebidos dentro del propio wasm**
+(`internal/defaults`, export `defaults()`) y se cargan automáticamente al
+arrancar la app: la UI solo expone las tablas gamma embebidas.
 
 ## Qué hace el original (evidencia del binario)
 
@@ -33,9 +63,12 @@ archivo de datos `sar_savedata.txt` que luego postprocesa `SarmakerPost.exe`.
 
 ## Puntos de interés, tuning point y shift (flujo del original)
 
-- **Puntos de interés**: 5 columnas (density/shift/contrast) como en el
+- **Puntos de interés**: 5 filas (density/shift/contrast) como en el
   diálogo del binario. Cada punto cargado tiene un QL, una densidad, un
-  shift (−100..100) y un contraste (10..400, 100 = neutro).
+  shift (−100..100) y un contraste (10..400, 100 = neutro). En la UI
+  **solo la densidad es obligatoria**: el QL no aparece en la interfaz y
+  se deriva automáticamente del punto de la curva con la densidad más
+  cercana.
 - **Tuning point**: selecciona el punto de la curva (índice 0..47 o QL);
   el shift se aplica con peso smoothstep centrado en ese punto: máximo en
   el pivote, decayendo suavemente a 0 en los extremos.
@@ -55,14 +88,62 @@ archivo de datos `sar_savedata.txt` que luego postprocesa `SarmakerPost.exe`.
   no se reprodujo byte a byte; se mantiene la estructura y todos los valores.
 - La generación de imagen SAR (sub_409120, buffers 1024×48) y el lanzamiento
   de `SarmakerPost.exe` no están incluidos.
+- **Varianza de 1 ulp en flotantes**: el compilador de Go puede contraer
+  mul+add en FMA en targets nativos (arm64) mientras el soft-float de
+  js/wasm es IEEE estricto, por lo que valores de display (p. ej. los
+  pesos smoothstep) pueden diferir en ~1 ulp entre ambas builds. Las
+  salidas enteras del engine (density words, `sar_savedata.txt`) son
+  exactas; `wasm/smoke.mjs` compara con tolerancia de 12 dígitos
+  significativos solo para flotantes.
 
 ## Uso
 
+Requisitos: Go 1.25+, Node 20.19+.
+
 ```sh
-go build -o sar-maker . && ./sar-maker   # http://localhost:8080
+make wasm          # compila el engine Go → webapp/public/sar.wasm
+cd webapp
+npm install        # primera vez
+npm run dev        # http://localhost:5173
 ```
 
-1. Sube `lpmod.prm` y `gamma2.prm` (botón *Load files*).
-2. Elige GAMMA No. y parámetros, pulsa *Compute* (htmx actualiza la tabla,
-   la curva SVG y el enlace de descarga).
-3. *Download sar_savedata.txt* genera el archivo con la estructura original.
+1. Las tablas gamma de ejemplo (`gamma2.prm`) van embebidas en el wasm y
+   **se cargan automáticamente al arrancar**; no hay selectores de
+   archivos.
+2. Cabecera con títulos y alertas; debajo, una sección de dos columnas
+   del **mismo tamaño**: a la izquierda la tarjeta de parámetros (GAMMA
+   No. y Base Color), a la derecha la tarjeta con la **curva**, que
+   aparece por defecto (G11) y se **recalcula automáticamente** al cambiar
+   GAMMA No. o Base Color, con su línea `GAMMA NO : n — dmax X, dmin Y`
+   siempre visible y sincronizada con la curva.
+3. Debajo, una sección a ancho completo con **Dmin y Dmax** lado a lado —
+   sus valores se **sincronizan automáticamente con la curva** mostrada
+   (mismo valor que la línea `dmax X, dmin Y`, multiplicado por 100: p. ej.
+   `dmax 3.00, dmin 0.15` → Dmax 300, Dmin 15) —, los **puntos de interés**
+   (solo densidad, shift y contraste; el QL se deriva automáticamente) y
+   el botón **Compute** al final, de uso exclusivo de esta sección: aplica
+   los cambios de Dmin/Dmax y de los puntos de interés.
+
+### Builds y tests
+
+| Comando | Qué hace |
+|---|---|
+| `make test` | tests del engine Go (`internal/sar`, `internal/sarwire`) |
+| `make smoke` | test diferencial: las mismas llamadas en Go nativo y en el wasm deben producir outputs idénticos |
+| `make e2e` | end-to-end en Chrome headless real: boot del wasm, gammas embebidas, compute y download |
+| `make web-build` | build de producción (`webapp/dist`, incluye el wasm) |
+| `make dev` | dev server de Vite |
+
+> El `make e2e` usa el Chrome local (por defecto
+> `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`; se puede
+> cambiar con `CHROME_PATH`).
+
+## Evidencia REA
+
+El binario `data/ocsarmk.exe` está analizado con REA (skill
+`reverse-engineer-anything`): `open_binary` confirma PE32 x86 con 695
+procedimientos y las funciones clave del port existen en las direcciones
+documentadas arriba (`sub_4017a0`, `sub_40a680`, `sub_40a5d0`,
+`sub_40a940`, `sub_40a870`, `sub_406710`, `sub_409120`, `sub_4056f0`,
+`sub_406580`). El frontend muestra el SHA-256 del binario analizado en el
+pie de página (lo reporta el propio engine wasm vía `version()`).
